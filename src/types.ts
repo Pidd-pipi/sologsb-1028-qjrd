@@ -35,6 +35,7 @@ export interface ComponentSpec {
   disabledScenarios: string;
   interactionSignature: string;
   examples: ComponentExample[];
+  dependencies: string[];
   revision: number;
   updatedAt: string;
   snapshots: ComponentSnapshot[];

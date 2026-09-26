@@ -9,7 +9,7 @@ const format = (value: unknown): string => {
   return String(value ?? '');
 };
 
-export function diffAgainstSnapshot(component: ComponentSpec, snapshot?: ComponentSnapshot): DiffRow[] {
+export function diffAgainstSnapshot(component: ComponentSpec, snapshot?: ComponentSnapshot, components: ComponentSpec[] = []): DiffRow[] {
   if (!snapshot) return [];
   const rows: DiffRow[] = [];
   for (const field of selectedFields) {
@@ -23,5 +23,9 @@ export function diffAgainstSnapshot(component: ComponentSpec, snapshot?: Compone
   const beforeExamples = format(snapshot.component.examples);
   const afterExamples = format(component.examples);
   if (beforeExamples !== afterExamples) rows.push({ field: 'examples', before: beforeExamples, after: afterExamples });
+  const nameOf = (id: string) => components.find((item) => item.id === id)?.name ?? id;
+  const beforeDependencies = (snapshot.component.dependencies ?? []).map(nameOf).join('\n');
+  const afterDependencies = (component.dependencies ?? []).map(nameOf).join('\n');
+  if (beforeDependencies !== afterDependencies) rows.push({ field: 'dependencies', before: beforeDependencies, after: afterDependencies });
   return rows;
 }

@@ -7,6 +7,17 @@ const clone = <T>(value: T): T => structuredClone(value);
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const signature = (component: ComponentSpec) => `${component.properties.map((item) => `${item.name}:${item.required}`).join('|')}::${component.interactionSignature}`;
 
+// Drafts saved before the dependency feature lack the field; fill it in so checks can rely on it.
+const normalizeState = (state: WorkspaceState): WorkspaceState => {
+  state.components.forEach((component) => {
+    component.dependencies = Array.isArray(component.dependencies) ? component.dependencies : [];
+    component.snapshots.forEach((snapshot) => {
+      snapshot.component.dependencies = Array.isArray(snapshot.component.dependencies) ? snapshot.component.dependencies : [];
+    });
+  });
+  return state;
+};
+
 export class SpecStore extends EventTarget {
   state: WorkspaceState;
   private undoStack: WorkspaceState[] = [];
@@ -49,6 +60,7 @@ export class SpecStore extends EventTarget {
       disabledScenarios: '记录不应使用该组件的场景。',
       interactionSignature: '',
       examples: [],
+      dependencies: [],
       revision: 1,
       updatedAt: new Date().toISOString(),
       snapshots: []
@@ -153,6 +165,58 @@ export class SpecStore extends EventTarget {
       const target = state.components.find((item) => item.id === selected.id);
       if (target) target.examples = target.examples.filter((item) => item.id !== exampleId);
     });
+  }
+
+  dependentsOf(componentId: string): ComponentSpec[] {
+    return this.state.components.filter((item) => item.id !== componentId && item.dependencies.includes(componentId));
+  }
+
+  addDependency(targetId: string): { ok: boolean; cycle?: string[] } {
+    const selected = this.selected;
+    if (!selected || targetId === selected.id) return { ok: false };
+    const target = this.state.components.find((item) => item.id === targetId);
+    if (!target || selected.dependencies.includes(targetId)) return { ok: false };
+    const path = this.findDependencyPath(targetId, selected.id);
+    if (path) return { ok: false, cycle: [selected.id, ...path] };
+    this.commit('添加依赖组件', (state) => {
+      const source = state.components.find((item) => item.id === selected.id);
+      if (!source || source.dependencies.includes(targetId)) return;
+      source.dependencies.push(targetId);
+      source.updatedAt = new Date().toISOString();
+    });
+    return { ok: true };
+  }
+
+  removeDependency(targetId: string): { ok: boolean; blockedBy?: string[] } {
+    const selected = this.selected;
+    if (!selected) return { ok: false };
+    const blockedBy = this.state.components
+      .filter((item) => item.id !== selected.id && item.dependencies.includes(targetId))
+      .map((item) => item.id);
+    if (blockedBy.length) return { ok: false, blockedBy };
+    this.commit('移除依赖组件', (state) => {
+      const source = state.components.find((item) => item.id === selected.id);
+      if (!source) return;
+      source.dependencies = source.dependencies.filter((id) => id !== targetId);
+      source.updatedAt = new Date().toISOString();
+    });
+    return { ok: true };
+  }
+
+  // Returns the dependency chain from `fromId` to `toId` (both included), or null when `toId` is not reachable.
+  private findDependencyPath(fromId: string, toId: string): string[] | null {
+    const visit = (id: string, trail: string[], seen: Set<string>): string[] | null => {
+      if (id === toId) return [...trail, id];
+      if (seen.has(id)) return null;
+      seen.add(id);
+      const component = this.state.components.find((item) => item.id === id);
+      for (const next of component?.dependencies ?? []) {
+        const found = visit(next, [...trail, id], seen);
+        if (found) return found;
+      }
+      return null;
+    };
+    return visit(fromId, [], new Set());
   }
 
   createSnapshot(reason = '手动版本') {
@@ -271,7 +335,7 @@ export class SpecStore extends EventTarget {
   private load(): WorkspaceState {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as WorkspaceState;
+      if (saved) return normalizeState(JSON.parse(saved) as WorkspaceState);
     } catch {
       // A corrupted local draft falls back to the bundled demo data.
     }

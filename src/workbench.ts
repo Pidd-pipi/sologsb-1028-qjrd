@@ -4,7 +4,14 @@ import { diffAgainstSnapshot } from './diff';
 import { SpecStore } from './store';
 import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
 
-type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'history';
+type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'dependencies' | 'history';
+
+type DependencyNotice = {
+  componentId: string;
+  kind: 'cycle' | 'blocked';
+  names: string[];
+  target?: string;
+};
 
 export class SpecA11yWorkbench extends LitElement {
   static properties = {
@@ -24,6 +31,8 @@ export class SpecA11yWorkbench extends LitElement {
   private toast = '';
   private showValidation = true;
   private toastTimer?: number;
+  private depCandidate = '';
+  private depNotice: DependencyNotice | null = null;
 
   static styles = css`
     :host {
@@ -88,6 +97,19 @@ export class SpecA11yWorkbench extends LitElement {
     textarea:focus, input:focus, select:focus { outline: 3px solid var(--spectrum-blue-400); outline-offset: 1px; border-color: var(--spectrum-blue-700); }
     textarea { min-height: 110px; resize: vertical; }
     .property-list, .example-list { display: grid; gap: 12px; }
+    .dep-hint { margin: 4px 0 14px; color: var(--spectrum-gray-700); font-size: 12px; line-height: 1.6; }
+    .dep-summary { color: var(--spectrum-gray-700); font-size: 12px; white-space: nowrap; }
+    .dep-add { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+    .dep-add select { flex: 1; min-width: 0; }
+    .dep-list { display: grid; gap: 8px; }
+    .dep-row {
+      display: flex; align-items: center; gap: 8px;
+      border: 1px solid var(--spectrum-gray-300); border-radius: 10px;
+      padding: 10px 12px; background: var(--spectrum-gray-75, var(--spectrum-gray-100));
+    }
+    .dep-info { flex: 1; min-width: 0; display: grid; gap: 2px; }
+    .dep-meta { color: var(--spectrum-gray-700); font-size: 11px; }
+    .dep-subheading { margin: 18px 0 10px; font-size: 13px; }
     .property-card, .example-card { border: 1px solid var(--spectrum-gray-300); border-radius: 12px; padding: 14px; background: var(--spectrum-gray-75, var(--spectrum-gray-100)); }
     .property-head, .example-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
     .property-head strong, .example-head strong { flex: 1; }
@@ -174,7 +196,7 @@ export class SpecA11yWorkbench extends LitElement {
       this.store.addComponent();
       return;
     }
-    const tabMap: Record<string, EditorTab> = { '1': 'overview', '2': 'api', '3': 'accessibility', '4': 'examples', '5': 'history' };
+    const tabMap: Record<string, EditorTab> = { '1': 'overview', '2': 'api', '3': 'accessibility', '4': 'examples', '5': 'history', '6': 'dependencies' };
     if (event.altKey && tabMap[event.key]) {
       event.preventDefault();
       this.tab = tabMap[event.key];
@@ -220,7 +242,7 @@ export class SpecA11yWorkbench extends LitElement {
                       <span>${item.name}</span>
                       <span class="pill ${item.status}">${this.statusLabel(item.status)}</span>
                     </span>
-                    <span class="item-meta">${item.category} · ${item.properties.length} 个属性 · ${item.examples.length} 个示例</span>
+                    <span class="item-meta">${item.category} · ${item.properties.length} 个属性 · ${item.examples.length} 个示例 · ${item.dependencies.length} 个依赖</span>
                   </button>
                 `) : html`<div class="search-empty">没有匹配的组件。可尝试属性名、键盘行为或代码文本。</div>`}
               </div>
@@ -232,7 +254,7 @@ export class SpecA11yWorkbench extends LitElement {
             </aside>
           </div>
           ${this.toast ? html`<sp-toast open variant="positive" timeout="3000">${this.toast}</sp-toast>` : nothing}
-          <div class="footer-hint">⌘/Ctrl+Z 撤销 · ⇧⌘/Ctrl+Z 重做 · ⌘/Ctrl+K 搜索 · Alt+1–5 切换面板</div>
+          <div class="footer-hint">⌘/Ctrl+Z 撤销 · ⇧⌘/Ctrl+Z 重做 · ⌘/Ctrl+K 搜索 · Alt+1–6 切换面板</div>
         </div>
       </sp-theme>
     `;
@@ -261,12 +283,14 @@ export class SpecA11yWorkbench extends LitElement {
         ${this.renderTab('accessibility', '3 无障碍')}
         ${this.renderTab('examples', '4 示例')}
         ${this.renderTab('history', '5 版本')}
+        ${this.renderTab('dependencies', '6 依赖')}
       </div>
       ${this.tab === 'overview' ? this.renderOverview(component) : nothing}
       ${this.tab === 'api' ? this.renderApi(component) : nothing}
       ${this.tab === 'accessibility' ? this.renderAccessibility(component) : nothing}
       ${this.tab === 'examples' ? this.renderExamples(component) : nothing}
       ${this.tab === 'history' ? this.renderHistory(component) : nothing}
+      ${this.tab === 'dependencies' ? this.renderDependencies(component) : nothing}
     `;
   }
 
@@ -384,7 +408,7 @@ export class SpecA11yWorkbench extends LitElement {
 
   private renderHistory(component: ComponentSpec): TemplateResult {
     const snapshot = component.snapshots[0];
-    const rows = diffAgainstSnapshot(component, snapshot);
+    const rows = diffAgainstSnapshot(component, snapshot, this.store.state.components);
     return html`
       <section class="panel">
         <div class="property-head">
@@ -399,6 +423,103 @@ export class SpecA11yWorkbench extends LitElement {
         ${this.hasStaleExamples(component) ? html`<div class="issue warning" style="margin-top: 14px"><strong>检测到待迁移示例</strong>迁移会保留代码内容，清理已删除属性引用并更新契约版本。<br /><button @click=${() => this.store.migrateExamples()}>立即迁移</button></div>` : nothing}
       </section>
     `;
+  }
+
+  private renderDependencies(component: ComponentSpec): TemplateResult {
+    const candidates = this.store.state.components.filter((item) => item.id !== component.id && !component.dependencies.includes(item.id));
+    const effectiveCandidate = candidates.some((item) => item.id === this.depCandidate) ? this.depCandidate : (candidates[0]?.id ?? '');
+    const dependents = this.store.dependentsOf(component.id);
+    const notice = this.depNotice?.componentId === component.id ? this.depNotice : null;
+    return html`
+      <section class="panel" aria-label="依赖组件">
+        <div class="property-head">
+          <h2>依赖组件</h2>
+          <span class="dep-summary">依赖 ${component.dependencies.length} 个组件 · 被 ${dependents.length} 个组件引用</span>
+        </div>
+        <p class="dep-hint">记录该组件组合了哪些组件。添加会形成循环时会被拒绝并保留原关系；仍被其他组件引用的条目不能移除。</p>
+        ${notice?.kind === 'cycle' ? html`
+          <div class="issue error" role="alert">
+            <strong>无法添加：会形成循环依赖</strong>
+            环上的组件：${notice.names.join(' → ')}。已保留原有依赖关系，未做任何改动。
+          </div>
+        ` : nothing}
+        ${notice?.kind === 'blocked' ? html`
+          <div class="issue warning" role="alert">
+            <strong>无法移除「${notice.target ?? ''}」</strong>
+            仍被以下组件占用：${notice.names.join('、')}。条目未移除。
+          </div>
+        ` : nothing}
+        <div class="dep-add">
+          <select aria-label="选择要依赖的组件" .value=${effectiveCandidate} @change=${(event: Event) => { this.depCandidate = (event.currentTarget as HTMLSelectElement).value; }}>
+            ${candidates.map((item) => html`<option value=${item.id}>${item.name}</option>`)}
+          </select>
+          <sp-button size="s" variant="secondary" ?disabled=${!candidates.length} @click=${() => this.addDependency(component, effectiveCandidate)}>添加依赖</sp-button>
+        </div>
+        <div class="dep-list">
+          ${component.dependencies.length ? repeat(component.dependencies, (depId) => depId, (depId) => {
+            const dep = this.store.state.components.find((item) => item.id === depId);
+            return html`
+              <div class="dep-row">
+                <div class="dep-info">
+                  <strong>${dep?.name ?? depId}</strong>
+                  <span class="dep-meta">${dep ? `${dep.category} · ${this.statusLabel(dep.status)}` : '组件已不存在'}</span>
+                </div>
+                ${dep ? html`<sp-action-button size="s" label="查看 ${dep.name}" @click=${() => this.store.select(dep.id)}>查看</sp-action-button>` : nothing}
+                <sp-action-button size="s" label="移除依赖 ${dep?.name ?? depId}" @click=${() => this.removeDependency(component, depId)}>移除</sp-action-button>
+              </div>
+            `;
+          }) : html`<div class="empty">尚未声明依赖组件。从上方选择组件添加。</div>`}
+        </div>
+        <h3 class="dep-subheading">反向引用（哪些组件依赖它）</h3>
+        <div class="dep-list">
+          ${dependents.length ? repeat(dependents, (item) => item.id, (item) => html`
+            <div class="dep-row">
+              <div class="dep-info">
+                <strong>${item.name}</strong>
+                <span class="dep-meta">${item.category} · ${this.statusLabel(item.status)}</span>
+              </div>
+              <sp-action-button size="s" label="查看 ${item.name}" @click=${() => this.store.select(item.id)}>查看</sp-action-button>
+            </div>
+          `) : html`<div class="empty">暂无组件引用它。</div>`}
+        </div>
+      </section>
+    `;
+  }
+
+  private addDependency(component: ComponentSpec, targetId: string) {
+    if (!targetId) return;
+    const result = this.store.addDependency(targetId);
+    if (result.ok) {
+      this.depNotice = null;
+      this.flash(`已添加依赖：${this.componentName(targetId)}`);
+    } else {
+      this.depNotice = {
+        componentId: component.id,
+        kind: 'cycle',
+        names: (result.cycle ?? []).map((id) => this.componentName(id))
+      };
+    }
+    this.requestUpdate();
+  }
+
+  private removeDependency(component: ComponentSpec, targetId: string) {
+    const result = this.store.removeDependency(targetId);
+    if (result.ok) {
+      this.depNotice = null;
+      this.flash(`已移除依赖：${this.componentName(targetId)}`);
+    } else {
+      this.depNotice = {
+        componentId: component.id,
+        kind: 'blocked',
+        target: this.componentName(targetId),
+        names: (result.blockedBy ?? []).map((id) => this.componentName(id))
+      };
+    }
+    this.requestUpdate();
+  }
+
+  private componentName(id: string): string {
+    return this.store.state.components.find((item) => item.id === id)?.name ?? id;
   }
 
   private renderPreview(component?: ComponentSpec): TemplateResult {
