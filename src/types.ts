@@ -35,6 +35,7 @@ export interface ComponentSpec {
   disabledScenarios: string;
   interactionSignature: string;
   examples: ComponentExample[];
+  dependencies: string[];
   revision: number;
   updatedAt: string;
   snapshots: ComponentSnapshot[];
@@ -58,7 +59,7 @@ export interface ValidationIssue {
   componentId: string;
   target: string;
   message: string;
-  field: 'properties' | 'examples' | 'keyboard' | 'screenReader';
+  field: 'properties' | 'examples' | 'keyboard' | 'screenReader' | 'dependencies';
 }
 
 export interface DiffRow {

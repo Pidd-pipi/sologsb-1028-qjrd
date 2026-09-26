@@ -42,6 +42,7 @@ const components: ComponentSpec[] = [
     ],
     revision: 3,
     updatedAt: now,
+    dependencies: [],
     snapshots: []
   },
   {
@@ -74,6 +75,7 @@ const components: ComponentSpec[] = [
     ],
     revision: 2,
     updatedAt: now,
+    dependencies: [],
     snapshots: []
   },
   {
@@ -106,6 +108,7 @@ const components: ComponentSpec[] = [
     ],
     revision: 2,
     updatedAt: now,
+    dependencies: ['button-spec'],
     snapshots: []
   }
 ];

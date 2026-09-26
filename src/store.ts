@@ -49,6 +49,7 @@ export class SpecStore extends EventTarget {
       disabledScenarios: '记录不应使用该组件的场景。',
       interactionSignature: '',
       examples: [],
+      dependencies: [],
       revision: 1,
       updatedAt: new Date().toISOString(),
       snapshots: []
@@ -155,6 +156,69 @@ export class SpecStore extends EventTarget {
     });
   }
 
+  dependentsOf(componentId: string): ComponentSpec[] {
+    return this.state.components.filter((item) => item.dependencies.includes(componentId));
+  }
+
+  addDependency(targetId: string): { ok: true } | { ok: false; cycle: string[] } {
+    const selected = this.selected;
+    if (!selected || targetId === selected.id) return { ok: false, cycle: [] };
+    if (!this.state.components.some((item) => item.id === targetId)) return { ok: false, cycle: [] };
+    if (selected.dependencies.includes(targetId)) return { ok: false, cycle: [] };
+    const path = this.findPath(targetId, selected.id);
+    if (path) return { ok: false, cycle: [selected.id, ...path] };
+    this.commit('添加依赖组件', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      target.dependencies.push(targetId);
+      target.updatedAt = new Date().toISOString();
+    });
+    return { ok: true };
+  }
+
+  removeDependency(targetId: string) {
+    const selected = this.selected;
+    if (!selected) return;
+    this.commit('移除依赖组件', (state) => {
+      const target = state.components.find((item) => item.id === selected.id);
+      if (!target) return;
+      target.dependencies = target.dependencies.filter((id) => id !== targetId);
+      target.updatedAt = new Date().toISOString();
+    });
+  }
+
+  removeComponent(componentId: string): { ok: true } | { ok: false; blockers: string[] } {
+    const blockers = this.dependentsOf(componentId);
+    if (blockers.length) return { ok: false, blockers: blockers.map((item) => item.name) };
+    this.commit('删除组件', (state) => {
+      state.components = state.components.filter((item) => item.id !== componentId);
+      state.components.forEach((item) => {
+        item.dependencies = item.dependencies.filter((id) => id !== componentId);
+      });
+      if (state.selectedId === componentId) state.selectedId = state.components[0]?.id ?? '';
+    });
+    return { ok: true };
+  }
+
+  private findPath(fromId: string, toId: string): string[] | null {
+    if (fromId === toId) return [fromId];
+    const visited = new Set([fromId]);
+    const queue: string[][] = [[fromId]];
+    while (queue.length) {
+      const path = queue.shift()!;
+      const last = path[path.length - 1];
+      const node = this.state.components.find((item) => item.id === last);
+      for (const next of node?.dependencies ?? []) {
+        if (next === toId) return [...path, next];
+        if (!visited.has(next)) {
+          visited.add(next);
+          queue.push([...path, next]);
+        }
+      }
+    }
+    return null;
+  }
+
   createSnapshot(reason = '手动版本') {
     const selected = this.selected;
     if (!selected) return;
@@ -225,6 +289,10 @@ export class SpecStore extends EventTarget {
       if (contractChanged && component.examples.length) {
         issues.push({ id: `${component.id}-contract`, level: 'info', componentId: component.id, target: component.name, message: '属性契约或交互签名发生变化，建议创建快照并迁移示例。', field: 'properties' });
       }
+      const missingDependencies = component.dependencies.filter((id) => !this.state.components.some((item) => item.id === id));
+      if (missingDependencies.length) {
+        issues.push({ id: `${component.id}-dependencies-missing`, level: 'warning', componentId: component.id, target: component.name, message: `依赖的组件已不存在：${missingDependencies.join('、')}，请在依赖面板清理。`, field: 'dependencies' });
+      }
     }
     return issues;
   }
@@ -271,11 +339,25 @@ export class SpecStore extends EventTarget {
   private load(): WorkspaceState {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved) return JSON.parse(saved) as WorkspaceState;
+      if (saved) return this.normalize(JSON.parse(saved) as WorkspaceState);
     } catch {
       // A corrupted local draft falls back to the bundled demo data.
     }
     return createInitialState();
+  }
+
+  private normalize(state: WorkspaceState): WorkspaceState {
+    // 旧版本草稿没有 dependencies 字段，这里补齐，保证重新打开后仍可核对。
+    state.components.forEach((component) => {
+      component.dependencies ??= [];
+      component.snapshots?.forEach((snapshot) => {
+        snapshot.component.dependencies ??= [];
+      });
+    });
+    if (!state.components.some((item) => item.id === state.selectedId)) {
+      state.selectedId = state.components[0]?.id ?? '';
+    }
+    return state;
   }
 
   private persist(_notify = true) {

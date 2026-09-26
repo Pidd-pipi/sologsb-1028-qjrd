@@ -4,7 +4,7 @@ import { diffAgainstSnapshot } from './diff';
 import { SpecStore } from './store';
 import type { ComponentExample, ComponentSpec, PreviewDensity, PreviewTheme, PropertySpec, ValidationIssue } from './types';
 
-type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'history';
+type EditorTab = 'overview' | 'api' | 'accessibility' | 'examples' | 'dependencies' | 'history';
 
 export class SpecA11yWorkbench extends LitElement {
   static properties = {
@@ -13,7 +13,10 @@ export class SpecA11yWorkbench extends LitElement {
     previewTheme: { state: true },
     previewDensity: { state: true },
     toast: { state: true },
-    showValidation: { state: true }
+    showValidation: { state: true },
+    pendingDependency: { state: true },
+    cycleNotice: { state: true },
+    deleteBlockers: { state: true }
   };
 
   private store = new SpecStore();
@@ -23,6 +26,10 @@ export class SpecA11yWorkbench extends LitElement {
   private previewDensity: PreviewDensity = 'regular';
   private toast = '';
   private showValidation = true;
+  private pendingDependency = '';
+  private cycleNotice: string[] | null = null;
+  private deleteBlockers: string[] | null = null;
+  private noticeComponentId = '';
   private toastTimer?: number;
 
   static styles = css`
@@ -174,7 +181,7 @@ export class SpecA11yWorkbench extends LitElement {
       this.store.addComponent();
       return;
     }
-    const tabMap: Record<string, EditorTab> = { '1': 'overview', '2': 'api', '3': 'accessibility', '4': 'examples', '5': 'history' };
+    const tabMap: Record<string, EditorTab> = { '1': 'overview', '2': 'api', '3': 'accessibility', '4': 'examples', '5': 'dependencies', '6': 'history' };
     if (event.altKey && tabMap[event.key]) {
       event.preventDefault();
       this.tab = tabMap[event.key];
@@ -183,6 +190,13 @@ export class SpecA11yWorkbench extends LitElement {
 
   protected render(): TemplateResult {
     const selected = this.store.selected;
+    if ((selected?.id ?? '') !== this.noticeComponentId) {
+      // 切换组件后清空上一次的操作提示，避免误导。
+      this.noticeComponentId = selected?.id ?? '';
+      this.cycleNotice = null;
+      this.deleteBlockers = null;
+      this.pendingDependency = '';
+    }
     const issues = this.store.validate();
     const selectedIssues = selected ? issues.filter((item) => item.componentId === selected.id) : [];
     const filtered = this.filteredComponents;
@@ -220,7 +234,7 @@ export class SpecA11yWorkbench extends LitElement {
                       <span>${item.name}</span>
                       <span class="pill ${item.status}">${this.statusLabel(item.status)}</span>
                     </span>
-                    <span class="item-meta">${item.category} · ${item.properties.length} 个属性 · ${item.examples.length} 个示例</span>
+                    <span class="item-meta">${item.category} · ${item.properties.length} 个属性 · ${item.examples.length} 个示例 · ${item.dependencies.length} 个依赖</span>
                   </button>
                 `) : html`<div class="search-empty">没有匹配的组件。可尝试属性名、键盘行为或代码文本。</div>`}
               </div>
@@ -232,7 +246,7 @@ export class SpecA11yWorkbench extends LitElement {
             </aside>
           </div>
           ${this.toast ? html`<sp-toast open variant="positive" timeout="3000">${this.toast}</sp-toast>` : nothing}
-          <div class="footer-hint">⌘/Ctrl+Z 撤销 · ⇧⌘/Ctrl+Z 重做 · ⌘/Ctrl+K 搜索 · Alt+1–5 切换面板</div>
+          <div class="footer-hint">⌘/Ctrl+Z 撤销 · ⇧⌘/Ctrl+Z 重做 · ⌘/Ctrl+K 搜索 · Alt+1–6 切换面板</div>
         </div>
       </sp-theme>
     `;
@@ -260,12 +274,14 @@ export class SpecA11yWorkbench extends LitElement {
         ${this.renderTab('api', '2 属性与状态')}
         ${this.renderTab('accessibility', '3 无障碍')}
         ${this.renderTab('examples', '4 示例')}
-        ${this.renderTab('history', '5 版本')}
+        ${this.renderTab('dependencies', '5 依赖')}
+        ${this.renderTab('history', '6 版本')}
       </div>
       ${this.tab === 'overview' ? this.renderOverview(component) : nothing}
       ${this.tab === 'api' ? this.renderApi(component) : nothing}
       ${this.tab === 'accessibility' ? this.renderAccessibility(component) : nothing}
       ${this.tab === 'examples' ? this.renderExamples(component) : nothing}
+      ${this.tab === 'dependencies' ? this.renderDependencies(component) : nothing}
       ${this.tab === 'history' ? this.renderHistory(component) : nothing}
     `;
   }
@@ -382,9 +398,103 @@ export class SpecA11yWorkbench extends LitElement {
     `;
   }
 
+  private renderDependencies(component: ComponentSpec): TemplateResult {
+    const all = this.store.state.components;
+    const dependencies = component.dependencies
+      .map((id) => all.find((item) => item.id === id))
+      .filter((item): item is ComponentSpec => Boolean(item));
+    const missing = component.dependencies.filter((id) => !all.some((item) => item.id === id));
+    const candidates = all.filter((item) => item.id !== component.id && !component.dependencies.includes(item.id));
+    const dependents = this.store.dependentsOf(component.id);
+    return html`
+      <section class="panel" aria-label="依赖组件清单">
+        <h2>依赖组件</h2>
+        <p class="item-meta" style="margin: 6px 0 14px">声明该组件组合使用了哪些组件；依赖关系会随本地草稿与版本快照一起保存。</p>
+        ${this.cycleNotice ? html`
+          <div class="issue error" role="alert">
+            <strong>无法添加：会形成循环依赖</strong>
+            环上的组件：${this.cycleNotice.join(' → ')}。已保留原有依赖关系，未做任何修改。
+          </div>
+        ` : nothing}
+        <div class="property-list">
+          ${dependencies.length ? dependencies.map((dep) => html`
+            <article class="property-card">
+              <div class="property-head" style="margin-bottom: 0">
+                <strong>${dep.name}</strong>
+                <span class="pill">${dep.category}</span>
+                <sp-action-button size="s" label="查看 ${dep.name}" @click=${() => this.store.select(dep.id)}>查看</sp-action-button>
+                <sp-action-button size="s" label="移除对 ${dep.name} 的依赖" @click=${() => { this.store.removeDependency(dep.id); this.flash(`已移除对 ${dep.name} 的依赖`); }}>移除</sp-action-button>
+              </div>
+            </article>
+          `) : html`<div class="empty">尚未声明依赖组件。</div>`}
+          ${missing.map((id) => html`
+            <div class="issue warning">
+              <strong>失效引用</strong>依赖的组件 ${id} 已不存在。
+              <button @click=${() => this.store.removeDependency(id)}>清理</button>
+            </div>
+          `)}
+        </div>
+        <div class="inline" style="margin-top: 14px; flex-wrap: wrap">
+          <select aria-label="选择要依赖的组件" style="max-width: 260px" .value=${this.pendingDependency} @change=${(event: Event) => { this.pendingDependency = (event.currentTarget as HTMLSelectElement).value; }}>
+            <option value="">选择组件…</option>
+            ${candidates.map((item) => html`<option value=${item.id}>${item.name}</option>`)}
+          </select>
+          <sp-button size="s" variant="secondary" ?disabled=${!this.pendingDependency} @click=${this.onAddDependency}>添加依赖</sp-button>
+        </div>
+      </section>
+      <section class="panel" aria-label="反向引用" style="margin-top: 16px">
+        <h2>被以下组件使用</h2>
+        ${dependents.length ? html`
+          <div class="component-list" style="margin-top: 10px">
+            ${dependents.map((item) => html`
+              <button class="component-item" @click=${() => this.store.select(item.id)}>
+                <span class="item-title"><span>${item.name}</span><span class="pill ${item.status}">${this.statusLabel(item.status)}</span></span>
+                <span class="item-meta">${item.category} · 在它的依赖清单中引用了当前组件</span>
+              </button>
+            `)}
+          </div>
+        ` : html`<div class="empty" style="margin-top: 10px">暂无其他组件引用它。</div>`}
+      </section>
+      <section class="panel" aria-label="删除组件" style="margin-top: 16px">
+        <h2>删除组件</h2>
+        ${this.deleteBlockers ? html`
+          <div class="issue error" role="alert">
+            <strong>无法删除：仍被其他组件使用</strong>
+            占用它的组件：${this.deleteBlockers.join('、')}。请先在它们的依赖清单中移除对当前组件的引用。
+          </div>
+        ` : nothing}
+        <p class="item-meta" style="margin: 6px 0 12px">仍被其他组件依赖的组件不能删除；删除可用 ⌘/Ctrl+Z 撤销。</p>
+        <sp-button variant="negative" @click=${this.onDeleteComponent}>删除 ${component.name}</sp-button>
+      </section>
+    `;
+  }
+
+  private onAddDependency = () => {
+    const result = this.store.addDependency(this.pendingDependency);
+    if (result.ok) {
+      this.cycleNotice = null;
+      this.flash('已添加依赖组件');
+    } else if (result.cycle.length) {
+      this.cycleNotice = result.cycle.map((id) => this.store.state.components.find((item) => item.id === id)?.name ?? id);
+    }
+    this.pendingDependency = '';
+  };
+
+  private onDeleteComponent = () => {
+    const selected = this.store.selected;
+    if (!selected) return;
+    const result = this.store.removeComponent(selected.id);
+    if (result.ok) {
+      this.deleteBlockers = null;
+      this.flash('组件已删除，可撤销');
+    } else {
+      this.deleteBlockers = result.blockers;
+    }
+  };
+
   private renderHistory(component: ComponentSpec): TemplateResult {
     const snapshot = component.snapshots[0];
-    const rows = diffAgainstSnapshot(component, snapshot);
+    const rows = diffAgainstSnapshot(component, snapshot, this.resolveComponentName);
     return html`
       <section class="panel">
         <div class="property-head">
@@ -446,6 +556,9 @@ export class SpecA11yWorkbench extends LitElement {
   private hasStaleExamples(component: ComponentSpec): boolean {
     return component.examples.some((example) => example.stale);
   }
+
+  private resolveComponentName = (id: string): string =>
+    this.store.state.components.find((item) => item.id === id)?.name ?? id;
 
   private statusLabel(status: ComponentSpec['status']): string {
     return { draft: '草稿', review: '待审', published: '已发布' }[status];
